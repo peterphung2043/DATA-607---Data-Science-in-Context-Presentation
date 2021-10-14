@@ -1,0 +1,137 @@
+---
+title: Changepoint Detection with R using `changepoint` Package
+author: Peter Phung
+output: html_document
+---
+
+### Introduction
+
+Data scientists are expected to work with time series data. Some use cases are listed below.
+
+- Predicting trends in stocks (specifically, predicting the closing price of a stock for a future date).
+- Quantifying changes over time for a variable (how much climate change has influenced temperature for a region over time, for example).
+- Forecasting the future.
+- Changepoint detection.
+
+This analysis will focus on changepoint detection and provides a case study for an office building in New York City.
+
+### What is Changepoint Detection?
+Changepoint detection involves finding datapoints in a time series dataset where a target statistical property changes rapidly and abruptly in a short period of time.
+
+There are many uses for this: climate change detection, speech analysis, human activity analysis, and electricity consumption analysis. An example is provided in the figure below.
+
+![**Fig 1: Changepoint detection example**](changepoint_detection_example.png)
+
+
+### Example with Electricity Consumption for an Office Building
+
+The `changepoint` package in R can be used to detect changepoints. This package was tested against the electricity consumption for a typical office building in NYC. In the "Implemented Measures" section shown on Figure 2, each of these measures are designed to be lower the electricity consumption for the facility. These implemented measures began to be implemented in the facility on the "Earliest Intervention Date" and they were finalized and permanently applied to the facility on the "Latest Intervention Date". If the implemented measures were successful, then the time series plot should show a sudden decrease in electricity consumption between the earliest and latest intervention dates. 
+
+Therefore, using the `changepoint` package to detect changepoints, Does a changepoint fall between the intervention dates for this facility?
+
+![**Fig 2: Information for Queens Borough Hall**](queens_borough_hall.png)
+
+
+### Import Data
+The data is stored on Github and then is imported using the `read.csv` function. The `select` function is then used in order to select just the `energy` and `datestamp` variables. The `energy` variable contains the hourly energy readouts for the facility. The `datestamp` variable contains the datestamps for when the energy readouts were taken.
+
+```{r import libraries, echo = FALSE, message = FALSE}
+
+library(tidyverse)
+library(padr)
+library(changepoint)
+library(knitr)
+
+```
+
+```{r import data}
+## Import data
+url <- 'https://raw.githubusercontent.com/peterphung2043/DATA-607---Data-Science-in-Context-Presentation/main/queens_borough_hall.csv'
+rtm_data <- read.csv(url(url), stringsAsFactors = FALSE)
+rtm_data$datestamp <- parse_datetime(rtm_data$datestamp)
+
+energy_usage <- rtm_data %>%
+  select(energy, datestamp)
+
+knitr::kable(energy_usage[1:5,])
+```
+
+### Generate Energy Time Series Plot
+
+The plot below shows that the electricity consumption for the facility follows a yearly seasonal pattern. Notice that during the summer months, the electricity consumption for the facility is significant, because most buildings in NYC use electricity to power the cooling systems needed to cool the occupants in the facility. In the winter months, the electricity consumption for the facility is much less than the electricity consumption during the summer months, since the facility switches over to other fuel sources in order to heat the building. Heating a building with electricity is extremely expensive, so other fuel sources, such as natural gas and fuel oil, are used.
+```{r energy time series plot hourly}
+
+ggplot(energy_usage, mapping = aes(x = datestamp, y = energy)) +
+  geom_line()
+```
+
+
+### Resample to Weekly
+
+Resampling to weekly is necessary, because when seasonal decomposition is applied to the data at an hourly granularity, the period of the seasonal component plot is 1 day, when it should be in fact one year. The code block below uses the `thicken` function in order to resample the data from hourly to weekly.
+```{r resample to weekly}
+weekly_energy_usage <- energy_usage %>% 
+  thicken("1 week") %>% 
+  group_by(datestamp_week) %>% 
+  summarise(energy = sum(energy)) %>%
+  rename(datestamp = datestamp_week)
+
+weekly_energy_usage <- weekly_energy_usage[2:(count(weekly_energy_usage)[[1]] - 1),]
+ggplot(weekly_energy_usage, mapping = aes(x = datestamp, y = energy)) + geom_line()
+```
+
+The plot above shows the weekly energy usage for the facility from 2015 to 2020.
+
+### Decompose using Seasonal Decomposition
+The sinusoidal pattern shown in `weekly_energy_usage` should be taken away. This sinusoidal pattern is the baseload for the office building. It is the component in the time series data that always stays constant no matter what year is focused on. If no interventions took place for the facility, then the trend for the data should be a straight line. However, in actuality, the trend begins to dip in March of 2019 as a result of the interventions for this facility, which are designed to reduce the electricity consumption for the facility.
+
+The `decompose` function is used in order to decompose the `weekly_energy_usage` dataframe into seasonal, trend, and residual components.
+
+```{r decompose using seasonal decomposition}
+weekly_energy_usage_ts <- ts(weekly_energy_usage$energy,
+                             frequency = 52, start = c(2015, 5))
+
+decomposed_weekly_energy_usage <- decompose(weekly_energy_usage_ts)
+
+ggplot(mapping = aes(x = weekly_energy_usage$datestamp,
+                     y = decomposed_weekly_energy_usage$seasonal)) + 
+  geom_line()
+```
+
+The plot above shows the constant baseload electricity consumption for the facility or in other words, the seasonal part of the seasonal decomposed `weekly_energy_usage` data.
+
+### Use `changepoints` Package
+
+We subtract the seasonal component from the original weekly energy usage, and the resulting value is stored in `observed_minus_seasonal`. `observed_minus_seasonal` represents the overall trend of the energy usage, once the constant component (the baseload) is taken away. From here, the `cpt.mean` function from the `changepoint` package was used in order to detect changepoints. The `cpt.mean` package uses the residual sum of squares formula in order to detect changepoints.
+
+$RSS = \sum(y_i - \bar{y})^2$
+
+Assume for the plot below, that at the 70th datapoint, there is an imaginary line drawn. The residual sum of squares is computed to the left of the line and then the residual sum of squares is computed to the right of the line. Then, the difference between the left and right residual sum of squares is stored somewhere as a list or dataframe. Then at the 71st datapoint, the residual sum of squares is computed to the left and right of that datapoint and the difference is taken, and this value is stored in that list or dataframe from earlier. Basically this process happens for all of the datapoints in the `observed_minus_seasonal` dataset.
+
+```{r observed_minus_seasonal plot}
+
+observed_minus_seasonal <- weekly_energy_usage$energy - decomposed_weekly_energy_usage$seasonal
+
+ggplot(mapping = aes(x = weekly_energy_usage$datestamp, y = observed_minus_seasonal)) +
+  geom_line()
+
+```
+
+The datapoint corresponding to the highest difference in the residual sum of squares corresponds to the greatest likelihood of where the changepoint lies for the dataset. This is why in the graph below, there are two red lines. If we pretend that there is an imaginary line between the two red lines, the difference in residual sum of squares to the left and right of that line is the greatest at that line.
+
+```{r plot changepoints}
+ansvar=cpt.mean(observed_minus_seasonal)
+plot(ansvar)
+```
+
+### Show Date of Changepoint
+
+The `ansvar` object contains a summary the number of changepoints and the index at where the changepoint occurred. We then use that index on the `weekly_energy_usage` dataframe in order to determine the datestamp at which the changepoint occurred.
+```{r}
+print(ansvar)
+
+weekly_energy_usage[205,]
+
+```
+
+The output above shows that the changepoint occurred on March 31st, 2019. Since this data is between the earliest and latest intervention dates, this allows us to conclude that the intervention has had a significant impact on the electricity consumption for the facility!
